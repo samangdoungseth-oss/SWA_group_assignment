@@ -1,0 +1,1203 @@
+---
+title: "COMP3020 Social Web Analytics – Group Project"
+author: "20755557, 22197363, 22213999"
+date: '2026'
+output:
+  html_document:
+    toc: true
+    toc_depth: '2'
+    df_print: paged
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+    latex_engine: xelatex
+subtitle: Bluesky Discussion of the Nepal Floods
+header-includes:
+- \let\oldtableofcontents\tableofcontents
+- \renewcommand{\tableofcontents}{\newpage\oldtableofcontents}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+```
+
+# Libraries
+
+```{r libraries}
+library(atrrr)
+library(dplyr)
+library(stringr)
+library(tm)
+library(SnowballC)
+library(igraph)
+```
+
+```{r disable-data-gathering, include=FALSE}
+knitr::opts_chunk$set(eval = FALSE)
+```
+# Bluesky Authentication
+
+```{r bluesky-auth}
+# we removed it after pulling the data to protect our member privacy
+```
+
+# Dataset Overview
+
+This project uses public Bluesky posts discussing the 2026 Nepal floods. Posts were collected using the `atrrr` package in R through the Bluesky API.
+
+Four search queries were used:
+
+- Nepal flood
+- Nepal floods
+- Nepal flooding
+- Nepal glacier
+
+Posts were collected from 26 August 2026 onwards, covering discussion from the beginning of the flood event through to the date of data collection.
+
+The initial searches returned 1,584 records. After duplicate posts were removed using the unique Bluesky `uri` field, 1,385 unique posts remained.
+
+# Data Collection
+
+## Test Search
+
+Before collecting the full dataset, a test search was performed to inspect the posts and variables returned by the Bluesky API.
+
+```{r test-search}
+nepal_test = search_skeet(
+  "Nepal flood",
+  sort = "latest",
+  since = "2026-08-26",
+  limit = 100
+)
+```
+
+## Inspecting the Downloaded Data
+
+```{r inspect-test}
+dim(nepal_test)
+
+names(nepal_test)
+
+head(nepal_test$text)
+```
+
+## Full Data Collection
+
+To collect a broader sample of Bluesky discussion about the Nepal floods, several related search terms were used. Each search was downloaded separately and then combined into one dataset.
+
+```{r full-data-collection}
+posts_flood = search_skeet(
+  "Nepal flood",
+  sort = "latest",
+  since = "2026-08-26",
+  limit = 300
+)
+
+posts_floods = search_skeet(
+  "Nepal floods",
+  sort = "latest",
+  since = "2026-08-26",
+  limit = 300
+)
+
+posts_flooding = search_skeet(
+  "Nepal flooding",
+  sort = "latest",
+  since = "2026-08-26",
+  limit = 300
+)
+
+posts_glacier = search_skeet(
+  "Nepal glacier",
+  sort = "latest",
+  since = "2026-08-26",
+  limit = 300
+)
+```
+
+```{r label-searches}
+posts_flood$search_term = "Nepal flood"
+posts_floods$search_term = "Nepal floods"
+posts_flooding$search_term = "Nepal flooding"
+posts_glacier$search_term = "Nepal glacier"
+```
+
+```{r combine-data}
+raw_posts = bind_rows(
+  posts_flood,
+  posts_floods,
+  posts_flooding,
+  posts_glacier
+)
+
+dim(raw_posts)
+
+table(raw_posts$search_term)
+```
+## Data Collection Summary
+
+The four searches were collected separately and then combined into one dataset.
+
+Because the same Bluesky post could be returned by more than one search query, the `uri` field was used to identify duplicate posts. Where a post was found by multiple searches, all matching search terms were retained in the `search_terms` variable.
+
+## Checking for Duplicate Posts
+
+The same Bluesky post may be returned by more than one search term. Duplicate posts were identified using the `uri` field, which uniquely identifies each Bluesky post.
+
+```{r check-duplicates}
+# Number of duplicated posts
+sum(duplicated(raw_posts$uri))
+
+# Number of unique posts
+length(unique(raw_posts$uri))
+```
+
+## Removing Duplicate Posts
+
+Because multiple search terms could return the same Bluesky post, duplicate posts were removed using the `uri` field. This ensures that each post only appears once in the dataset.
+
+```{r remove-duplicates}
+posts = raw_posts %>%
+  distinct(uri, .keep_all = TRUE)
+
+dim(posts)
+
+sum(duplicated(posts$uri))
+```
+
+## Checking Post Relevance
+
+A random sample of posts was inspected to check whether the search terms were returning content relevant to the Nepal floods before applying any further filtering.
+
+```{r relevance-check}
+set.seed(3020)
+
+relevance_sample = posts %>%
+  slice_sample(n = 20) %>%
+  select(search_term, text)
+
+relevance_sample
+```
+
+## Checking Search Term Quality
+
+A small sample from each search term was inspected to determine whether any search query was returning a large amount of unrelated content.
+
+```{r search-term-quality}
+set.seed(3020)
+
+term_samples = raw_posts %>%
+  group_by(search_term) %>%
+  slice_sample(n = 10) %>%
+  ungroup() %>%
+  select(search_term, text)
+
+term_samples %>%
+  mutate(text = str_trunc(text, 140))
+```
+## Filtering Relevant Posts
+
+Although most retrieved posts were related to the Nepal floods, some search results were unrelated or only loosely connected to the event. A relevance filter was therefore applied using keywords relating to Nepal and flood-related hazards.
+
+```{r relevance-filter}
+place_pattern = "nepal|rasuwa|nuwakot|trishuli|bhote koshi"
+
+hazard_pattern = "flood|flooding|floods|landslide|glacier|glacial|debris flow"
+
+posts = posts %>%
+  mutate(
+    text_lower = str_to_lower(text),
+    relevant = str_detect(text_lower, place_pattern) &
+               str_detect(text_lower, hazard_pattern)
+  )
+
+table(posts$relevant)
+```
+## Inspecting Posts Flagged as Irrelevant
+
+Before removing posts classified as irrelevant, a random sample was manually inspected to ensure that the relevance rule was not excluding genuine Nepal flood discussion.
+
+```{r inspect-irrelevant}
+set.seed(3020)
+
+irrelevant_sample = posts %>%
+  filter(relevant == FALSE) %>%
+  slice_sample(n = 30) %>%
+  select(search_term, text)
+
+irrelevant_sample %>%
+  mutate(text = str_trunc(text, 180)) %>%
+  print(n = 30, width = Inf)
+```
+
+# Data Cleaning and Checks
+
+The dataset was checked and cleaned before analysis. The original post text was retained in the `text` variable, while a separate `clean_text` variable was created for text analysis.
+
+| Step | What was done | Result |
+|---|---|---|
+| Duplicate posts | Duplicate records were identified using the unique Bluesky `uri` field | 1,385 unique posts remained |
+| Missing/blank text | Posts with missing or blank original text were removed | 1,335 posts remained |
+| URL removal | Web addresses were removed from the cleaned text | Link-only posts became empty cleaned text |
+| Text cleaning | Numbers, punctuation and excess whitespace were removed and text was converted to lowercase | Clean text prepared for analysis |
+| Text-analysis filtering | Posts with no remaining cleaned text were excluded from the text corpus only | 1,206 posts remained for text analysis |
+| Stop words | Common English stop words were removed | Reduced uninformative terms |
+| Stemming | Words were reduced to common stems using `SnowballC` | Prepared text for term-based analysis |
+| Document-Term Matrix | A DTM was generated using the `tm` package | 1,206 documents × 3,687 terms |
+
+
+## Removing Empty Posts
+
+The initial relevance check showed that many genuine Nepal flood posts contained only links or short comments. Therefore, an automatic keyword-based relevance filter was not used to remove posts, as it could incorrectly exclude relevant content.
+
+Instead, the dataset was returned to the set of unique posts and only records with missing or empty text were removed at this stage.
+
+```{r remove-empty-posts}
+posts = raw_posts %>%
+  distinct(uri, .keep_all = TRUE)
+
+# Count missing or empty posts
+sum(is.na(posts$text) | str_trim(posts$text) == "")
+
+# Remove missing or empty posts
+posts = posts %>%
+  filter(
+    !is.na(text),
+    str_trim(text) != ""
+  )
+
+dim(posts)
+```
+## Cleaning Post Text
+
+The original post text was retained, while a separate `clean_text` variable was created for later text analysis. URLs, punctuation, numbers and excess whitespace were removed, and all text was converted to lowercase.
+
+```{r clean-text}
+posts = posts %>%
+  mutate(
+    clean_text = text,
+
+    # Remove URLs and web addresses
+    clean_text = str_replace_all(
+      clean_text,
+      "https?://\\S+|www\\.\\S+|\\b\\S+\\.(com|org|net|au|co|io)(/\\S*)?",
+      " "
+    ),
+
+    # Remove numbers
+    clean_text = str_replace_all(clean_text, "[0-9]+", " "),
+
+    # Remove punctuation
+    clean_text = str_replace_all(clean_text, "[[:punct:]]", " "),
+
+    # Convert to lowercase
+    clean_text = str_to_lower(clean_text),
+
+    # Remove extra spaces
+    clean_text = str_squish(clean_text)
+  )
+```
+
+```{r inspect-cleaning}
+head(
+  posts %>%
+    select(text, clean_text),
+  5
+)
+```
+
+## Preparing Text for Analysis
+
+Posts containing only links or no remaining text after cleaning were retained in the main dataset, as their engagement and date information may still be useful. A separate dataset was created for text analysis containing only posts with non-empty cleaned text.
+
+```{r prepare-text-data}
+text_posts = posts %>%
+  filter(clean_text != "")
+
+dim(text_posts)
+```
+## Creating the Text Corpus
+
+The cleaned Bluesky post text was converted into a corpus using the `tm` package. Stop words were removed and words were stemmed, following the text preparation process used in the COMP3020 practical exercises.
+
+```{r create-corpus}
+Bluesky.corpus = Corpus(VectorSource(text_posts$clean_text))
+
+Bluesky.corpus = tm_map(
+  Bluesky.corpus,
+  function(x) iconv(x, to = "UTF8", sub = "byte")
+)
+
+corpus = tm_map(
+  Bluesky.corpus,
+  function(x) iconv(x, to = "ASCII", sub = " ")
+)
+
+corpus = tm_map(corpus, removeNumbers)
+corpus = tm_map(corpus, removePunctuation)
+corpus = tm_map(corpus, stripWhitespace)
+corpus = tm_map(corpus, tolower)
+corpus = tm_map(corpus, removeWords, stopwords())
+corpus = tm_map(corpus, stemDocument)
+```
+## Preparing the Document-Term Matrix
+
+A Document-Term Matrix was created from the cleaned corpus so that the prepared text can later be used for techniques such as word frequency, TF-IDF and clustering.
+
+```{r create-dtm}
+Bluesky.dtm = DocumentTermMatrix(corpus)
+
+Bluesky.matrix = as.matrix(Bluesky.dtm)
+
+dim(Bluesky.matrix)
+```
+## Inspecting Variables for Data Preparation
+
+Before creating additional variables, the data types of the post date and engagement fields were inspected.
+
+```{r inspect-preparation}
+str(
+  posts %>%
+    select(
+      created_at,
+      indexed_at,
+      like_count,
+      reply_count,
+      repost_count,
+      quote_count
+    )
+)
+```
+## Preparing Date and Engagement Variables
+
+The Bluesky API returned post dates as date-time variables and engagement measures as numeric counts. A separate post date and total engagement variable were created while retaining the original engagement measures.
+
+```{r prepare-variables}
+posts = posts %>%
+  mutate(
+    post_date = as.Date(created_at),
+    total_engagement = like_count +
+                       reply_count +
+                       repost_count +
+                       quote_count
+  )
+
+summary(posts$total_engagement)
+```
+## Recording All Matching Search Terms
+
+Some Bluesky posts were returned by more than one search query. Rather than keeping only the first search term, all search terms that retrieved each post were combined and recorded.
+
+```{r combine-search-terms}
+# Find every search term that retrieved each post
+term_lookup = raw_posts %>%
+  group_by(uri) %>%
+  summarise(
+    search_terms = paste(
+      sort(unique(search_term)),
+      collapse = "; "
+    ),
+    .groups = "drop"
+  )
+
+# Replace the old single search_term column
+posts = posts %>%
+  select(-search_term) %>%
+  left_join(term_lookup, by = "uri")
+
+# Do the same for the text-analysis dataset
+text_posts = text_posts %>%
+  select(-search_term) %>%
+  left_join(term_lookup, by = "uri")
+
+# Check some posts found by multiple searches
+posts %>%
+  filter(str_detect(search_terms, ";")) %>%
+  select(uri, search_terms) %>%
+  head(10)
+```
+
+## Final Prepared Dataset
+
+The final dataset contains the original post information, cleaned text, posting date and engagement variables required for later analysis.
+
+```{r final-dataset}
+posts_final = posts %>%
+  select(
+    uri,
+    author_handle,
+    author_name,
+    text,
+    clean_text,
+    created_at,
+    indexed_at,
+    post_date,
+    like_count,
+    reply_count,
+    repost_count,
+    quote_count,
+    total_engagement,
+    langs,
+    search_terms
+  )
+
+dim(posts_final)
+
+head(posts_final)
+```
+## Relevance Check
+
+A keyword-based relevance filter was tested to determine whether posts directly referred to Nepal and a flood-related hazard.
+
+However, manual inspection showed that this rule incorrectly flagged some relevant posts as irrelevant. This occurred particularly when a post consisted mainly of a news link, headline or short comment where the flood information was contained in the linked article rather than the visible post text.
+
+For this reason, the automatic relevance filter was not used to remove posts. Instead, the dataset retained the unique search results and only removed records with missing or blank original text.
+
+# Exporting Prepared Data
+
+The cleaned and prepared datasets were exported so they can be used by the remaining group members for further analysis.
+
+```{r export-data}
+
+# Convert Bluesky language list column into normal text
+posts_final = posts %>%
+  mutate(
+    language = sapply(
+      langs,
+      function(x) paste(x, collapse = ", ")
+    )
+  ) %>%
+  select(
+    uri,
+    author_handle,
+    author_name,
+    text,
+    clean_text,
+    created_at,
+    indexed_at,
+    post_date,
+    like_count,
+    reply_count,
+    repost_count,
+    quote_count,
+    total_engagement,
+    language,
+    search_terms
+  )
+
+# Create data folder if it does not already exist
+dir.create("data", showWarnings = FALSE)
+
+# Save full prepared dataset as CSV
+write.csv(
+  posts_final,
+  "data/nepal_posts_prepared.csv",
+  row.names = FALSE
+)
+
+# Save R version of prepared dataset
+saveRDS(
+  posts_final,
+  "data/nepal_posts_prepared.rds"
+)
+
+# Save updated text-analysis dataset
+saveRDS(
+  text_posts,
+  "data/nepal_text_posts.rds"
+)
+
+# Save Document-Term Matrix
+saveRDS(
+  Bluesky.dtm,
+  "data/nepal_dtm.rds"
+)
+
+# Check exported files
+list.files("data")
+```
+# Output Files
+
+The cleaned and prepared data were saved so that later analysis can be conducted without downloading the Bluesky data again.
+
+| File | Purpose |
+|---|---|
+| `nepal_posts_prepared.csv` | Main cleaned dataset in CSV format |
+| `nepal_posts_prepared.rds` | Main prepared dataset for use in R |
+| `nepal_text_posts.rds` | Posts containing usable cleaned text for text analysis |
+| `nepal_dtm.rds` | Prepared Document-Term Matrix |
+
+## Final Data Check
+
+The exported files were reloaded to confirm that the prepared datasets were saved successfully and retained the expected number of observations.
+
+```{r final-check}
+check_posts = readRDS("data/nepal_posts_prepared.rds")
+check_text = readRDS("data/nepal_text_posts.rds")
+check_dtm = readRDS("data/nepal_dtm.rds")
+
+dim(check_posts)
+dim(check_text)
+dim(check_dtm)
+
+names(check_posts)
+```
+
+```{r enable-analysis, include=FALSE, eval=TRUE}
+knitr::opts_chunk$set(eval = TRUE)
+```
+
+
+# Data Preparation
+
+The investigation examines Bluesky posts relating to the Nepal flood using hypothesis testing, clustering and network analysis. The hypothesis test examines engagement behaviour, while clustering and network analysis are used to investigate the content and structure of the discussion.
+
+The prepared post dataset and Document-Term Matrix are used across multiple sections of the investigation. Therefore, they are loaded before any of the individual analyses are performed.
+
+```{r}
+posts <- read.csv("nepal_posts_prepared.csv")
+
+dtm <- readRDS("nepal_dtm.rds")
+
+dtm_matrix <- as.matrix(dtm)
+```
+
+The size and format of the datasets were checked before continuing with the analysis.
+
+```{r}
+dim(posts)
+
+class(dtm)
+dim(dtm_matrix)
+```
+
+# Hypothesis Testing
+
+## Research Question
+
+The hypothesis testing section examines whether one characteristic of a post, the presence of an external link, is associated with its engagement.
+
+The research question is:
+
+**Do Bluesky posts about the "Nepal Flood" with links have different engagement levels compared with posts without links?**
+
+Posts containing links may be used to share news reports, updates or other external information. Therefore, examining their engagement provides insight into how users interact with information-sharing posts during discussion of the Nepal flood.
+
+The later clustering and network analyses focus on the content of the discussion, while this hypothesis test focuses on engagement with the posts.
+
+## Hypotheses
+
+$H_0$: Posts with links have equal engagement to posts without links.
+
+$$\mu_{link} = \mu_{no\ link}$$
+
+$H_A$: Posts with links and posts without links do not have the same engagement level.
+
+$$\mu_{link} \neq \mu_{no\ link}$$
+
+## Why This Test
+
+A Welch two-sample t-test was selected because the response variable, `total_engagement`, is numerical, while `has_link` divides the posts into two independent groups: posts with links and posts without links.
+
+A chi-squared test of independence was also considered. However, this would require converting the numerical engagement score into categories such as "high" and "low" engagement. Doing so would discard information contained in the original numerical variable. Therefore, a two-sample t-test provides a more appropriate comparison of the mean engagement scores between the two groups.
+
+## Method
+
+### Data Preparation
+
+Firstly, a new dataframe is created to only store the `text` and `total_engagement`. Then a new column called `has_link` is added which contains the datatype of TRUE/FALSE. `grepl()` is used to check whether the text contains either `https://`, `http://` or `www`.
+
+```{r}
+posts_and_scores <- posts[, c("text", "total_engagement")]
+
+posts_and_scores$has_link <- grepl(
+  "https?://|www",
+  posts_and_scores$text,
+  ignore.case = TRUE
+)
+```
+
+Posts that contain those queries were assigned to TRUE.
+
+### Group Size
+
+The group size was checked using the `table()` function.
+
+```{r}
+# count unique elements in has_link, which are T/F
+table(posts_and_scores$has_link)
+```
+
+There were **808 posts without links** and **529 posts with links**, providing enough data size for the groups comparison.
+
+### Descriptive Statistic
+
+The mean engagement score was calculated separately for both groups.
+
+```{r}
+# group by "has_link" and find the mean using "total_engagement"
+aggregate(
+  total_engagement ~ has_link,
+  data = posts_and_scores,
+  mean
+)
+```
+
+Posts without links had a mean engagement score of **5.57**, while posts with links had a mean engagement score of **5.00**. The difference between the two is approximately **0.57** engagement points.
+
+Although the descriptive result suggests slightly higher engagement among posts without links, a statistical test is required to determine whether the observed difference is significant.
+
+### Welch Two-Sample t-test
+
+Welch two-sample t-test is used to compare the mean between the two groups.
+
+```{r}
+t.test(
+  total_engagement ~ has_link,
+  data = posts_and_scores
+)
+```
+
+## Result
+
+The test provides a p-value of **0.66**. Since it is greater than the significance level of 0.05, the null hypothesis was not rejected.
+
+The 95% confidence interval of the difference in mean is approximately:
+
+$$[-1.95, 3.08]$$
+
+This interval includes zero which is also consistent with our observation earlier.
+
+We can conclude that the statistical test found insufficient evidence to suggest that Bluesky posts with links have different engagement to posts without links within this collected data set.
+
+# Clustering
+
+The purpose of the clustering analysis is to identify groups of Bluesky posts that discuss similar topics relating to the Nepal flood. K-means clustering was applied to TF-IDF weighted document vectors so that posts with similar word usage could be grouped together.
+
+## Data Preparation
+
+### Removing Search Query Terms
+
+Terms closely related to the original search query, such as "Nepal" and "flood", were removed. Since these terms occur frequently as a result of the way the posts were collected, they provide little information for distinguishing between different topics.
+
+```{r}
+dtm_matrix <- dtm_matrix[
+  ,
+  !colnames(dtm_matrix) %in% c(
+    "nepal",
+    "flood",
+    "flooding",
+    "floods",
+    "nepali",
+    "nepales",
+    "nepalflood"
+  )
+]
+```
+
+A further check was performed to identify any remaining terms containing "Nepal" or "flood" that may be too closely related to the search query.
+
+```{r}
+grep(
+  "nepal|flood",
+  colnames(dtm_matrix),
+  value = TRUE
+)
+```
+
+## TF-IDF Weighting
+
+TF-IDF weighting was used to reduce the influence of terms that occur frequently across many posts while giving greater importance to terms that are more distinctive to particular documents.
+
+Since the DTM had already been converted into a matrix, TF-IDF was calculated manually.
+
+The term frequency was calculated using:
+
+$$TF = \log(f + 1)$$
+
+while inverse document frequency was calculated using:
+
+$$IDF = \log\left(\frac{N}{df}\right)$$
+
+The final TF-IDF matrix was then obtained by multiplying the TF and IDF values.
+
+```{r}
+N <- nrow(dtm_matrix)
+
+IDF <- log(N / colSums(dtm_matrix > 0))
+
+TF <- log(dtm_matrix + 1)
+
+weighted_tfidf <- TF %*% diag(IDF)
+```
+
+### Removing Empty Documents
+
+After TF-IDF weighting, some documents contained no remaining terms and therefore had a total weight of zero. These empty documents were identified and removed before clustering.
+
+The row numbers were also stored so that the same documents could later be removed from the original post data.
+
+```{r}
+dim(weighted_tfidf)
+
+empty_rows <- which(
+  rowSums(weighted_tfidf) == 0
+)
+
+non_empty <- rowSums(weighted_tfidf) > 0
+
+weighted_tfidf <- weighted_tfidf[
+  non_empty,
+]
+
+sum(
+  rowSums(weighted_tfidf) == 0
+)
+
+dim(weighted_tfidf)
+```
+
+## Normalisation
+
+The TF-IDF vectors were normalised to unit length before clustering. This reduces the influence of document length so that longer posts do not dominate the distance calculation simply because they contain more words.
+
+Each document vector was divided by its Euclidean length:
+
+$$\hat{x} = \frac{x}{||x||}$$
+
+```{r}
+norm_tfidf <- diag(
+  1 / sqrt(rowSums(weighted_tfidf^2))
+) %*% weighted_tfidf
+```
+
+A check was then performed to confirm that the Euclidean length of each document vector was approximately 1.
+
+```{r}
+summary(
+  sqrt(rowSums(norm_tfidf^2))
+)
+```
+
+## Selecting the Number of Clusters
+
+K-means clustering requires the number of clusters, $k$, to be selected beforehand. The within-cluster sum of squares (SSW) was calculated for values of $k$ from 1 to 10.
+
+A lower SSW indicates that posts are located closer to the centre of their assigned cluster. However, increasing the number of clusters will naturally reduce SSW, so the elbow method was used to identify a point where further increases in $k$ produced smaller improvements.
+
+```{r SSW-loop, cache=TRUE}
+set.seed(3020)
+
+SSW <- numeric(10)
+
+for (n in 1:10) {
+  K <- kmeans(
+    norm_tfidf,
+    n,
+    nstart = 30
+  )
+
+  SSW[n] <- K$tot.withinss
+}
+```
+
+The resulting SSW values were plotted against the number of clusters.
+
+```{r}
+plot(
+  1:10,
+  SSW,
+  type = "b",
+  xlab = "Number of Clusters",
+  ylab = "Within Cluster sum of squares"
+)
+```
+
+$K = 7$ was selected because this was the first visible "elbow" in the plot above.
+
+## K-means Clustering
+
+```{r}
+set.seed(3020)
+
+k7 <- kmeans(
+  norm_tfidf,
+  7,
+  nstart = 30
+)
+```
+
+The number of posts assigned to each cluster was checked.
+
+```{r}
+table(k7$cluster)
+```
+
+## Cluster Interpretation
+
+The original text data was loaded and the documents that became empty during TF-IDF preparation were removed so that the post rows remained aligned with the clustering data.
+
+```{r}
+df <- readRDS("nepal_text_posts.rds")
+
+text_posts_no_empty <- df[-empty_rows,]
+
+dtm_matrix_no_empty <- dtm_matrix[-empty_rows,]
+
+colnames(weighted_tfidf) <- colnames(dtm_matrix_no_empty)
+```
+
+The top words of each cluster were identified by finding the average TF-IDF weights of the terms within each cluster.
+
+```{r}
+each_clusterTermWeight <- list()
+
+for (i in 1:7){
+
+  cluster.number <- i
+
+  clusterpostsId <- which(k7$cluster == cluster.number)
+
+  clusterwords <- weighted_tfidf[clusterpostsId,]
+
+  clusterTermWeight <- colMeans(clusterwords)
+
+  top <- sort(clusterTermWeight, decreasing = TRUE)[1:4]
+
+  each_clusterTermWeight[[i]] <- names(top)
+}
+```
+
+The result variables were prepared for presentation.
+
+```{r}
+cluster_size <- table(k7$cluster)
+cluster_size <- as.numeric(cluster_size)
+
+str(each_clusterTermWeight)
+
+top_terms_text <- sapply(
+  each_clusterTermWeight,
+  function(x) paste(x, collapse = ", ")
+)
+```
+
+The cluster sizes, top terms and possible themes were combined into a dataframe.
+
+```{r}
+cluster_result <- data.frame(
+  Cluster = 1:7,
+  `Number of posts` = cluster_size,
+  `Top Terms` = top_terms_text,
+  `Possible Theme` = c(
+    "Landslides and casualties in India",
+    "Warming, glaciers and human health",
+    "Climate justice and disaster funding",
+    "General disaster impact and missing people",
+    "Research and Tibet crisis discussion",
+    "Climate change and glacier collapse",
+    "Information sharing and account discussion"
+  )
+)
+
+cluster_result
+```
+
+## Clustering Results
+
+The clustering analysis identified seven groups of posts discussing different aspects of the Nepal flood and related issues.
+
+Cluster 4 was substantially larger than the other clusters, containing **812 posts**, and appeared to represent broad discussion of the disaster, including missing people, affected communities and devastation.
+
+Several smaller clusters represented more specific topics. Cluster 1 focused on landslides and casualties, while Clusters 2 and 6 contained discussion relating to glaciers, warming and climate change. Cluster 3 appeared to focus on climate justice and disaster funding.
+
+The smallest clusters represented more specialised discussions. Cluster 5 contained terms relating to studies, Tibet and the wider crisis, while Cluster 7 appeared to involve information sharing and accounts discussing the event.
+
+Overall, the clustering results suggest that although much of the Bluesky discussion consisted of general reporting and discussion of the disaster, several smaller groups of posts focused on specific environmental, social and climate-related issues.
+
+# Network Analysis
+
+## Network analysis
+
+```{r}
+# Check if the terms 'nepal' and 'flood' are removed as they are the search terms
+
+any(grepl("\\bnepal\\b", posts$clean_text))
+any(grepl("\\bflood\\b", posts$clean_text))
+any(grepl("\\bs\\b", posts$clean_text))
+any(grepl("\\bing\\b", posts$clean_text))
+
+
+# both return true so the terms are removed from the data set
+posts$clean_text <- gsub("nepal", "", posts$clean_text)
+posts$clean_text <- gsub("flood", "", posts$clean_text)
+posts$clean_text <- gsub("\\bs\\b", "", posts$clean_text)
+posts$clean_text <- gsub("\\bing\\b", "", posts$clean_text)
+
+
+# confirming the terms were removed
+any(grepl("\\bnepal\\b", posts$clean_text))
+any(grepl("\\bflood\\b", posts$clean_text))
+any(grepl("\\bs\\b", posts$clean_text))
+any(grepl("\\bing\\b", posts$clean_text))
+
+```
+
+
+```{r}
+# create a new document term matrix from the filtered posts data set
+corpus <- VCorpus(VectorSource(posts$clean_text))
+corpus <- tm_map(corpus, removeWords, stopwords("english"))
+dtm <- DocumentTermMatrix(corpus, control = list(wordLengths = c(1, Inf)))
+
+# removing empty terms from the document term matrix
+dtm <- dtm[, colnames(dtm) != ""]
+
+dtm_matrix <- as.matrix(dtm)
+
+dim(dtm_matrix)
+
+```
+
+
+```{r}
+# creating the term document matrix
+tdm <- as.TermDocumentMatrix(dtm)
+tdm_matrix <- as.matrix(tdm)
+
+```
+
+
+```{r}
+# creating the adjacency matrix
+
+adj_matrix <- tdm_matrix %*% t(tdm_matrix)
+
+adj_matrix[1:5, 1:5]
+
+dim(adj_matrix)
+
+```
+
+Due to the extremely high number of dimensions in the adjacency matrix, we are unable to create the graph. As a result, we are using TF-IDF to compute the weights of terms in the term document matrix in hopes of creating a reduced adjacency matrix.This reduced the network from 5029 terms to 500 while retaining terms considered most important according to TF-IDF.
+
+
+```{r}
+# using TF-IDF to provide terms with a weight
+
+tdm_tfidf <- weightTfIdf(tdm)
+tdm_tfidf_matrix <- as.matrix(tdm_tfidf)
+term_scores <- rowSums(tdm_tfidf_matrix)
+top_terms <- names(sort(term_scores, decreasing = TRUE))[1:500] # selects the top 500 terms according to their TF-IDF
+top_terms <- top_terms[top_terms != ""] # removes the blank terms
+new_tdm_matrix <- tdm_matrix[top_terms, ]
+
+dim(new_tdm_matrix)
+
+new_adj_matrix <- new_tdm_matrix %*% t(new_tdm_matrix)
+
+new_adj_matrix[1:5, 1:5]
+
+dim(new_adj_matrix)
+
+```
+
+### Define nodes and edges, explain what edges represent and justify whether the graph is directed or undirected
+
+The nodes in the graph represent the unique terms that are found throughout the document whiles edges are used to represent the connection between those words. If two nodes are linked by an edge it shows that they appear in the same document at least one. Weighted edges are are also used to outline the frequency of these connections. A higher weighted edge means that two unique words occur in the same document multiple times. 
+
+
+Furthermore, the graph is undirected. This is determined by examining the adjacency matrix. The matrix is symmetrical along its diagonal which means the weight from A to B and the weight from B to A is the exact same. Therefore the graph is undirected.
+
+
+### Node, edge counts and density 
+
+```{r}
+# node count
+node_count <- nrow(new_adj_matrix)
+node_count
+```
+
+```{r}
+# edge count
+edge_count <- (sum(new_adj_matrix != 0) - nrow(new_adj_matrix))/2
+edge_count
+```
+
+```{r}
+# density
+density <- (2 * edge_count) / (node_count * (node_count - 1))
+density
+
+```
+
+```{r}
+#degree distribution
+degree <- rowSums(new_adj_matrix > 0)
+head(degree)
+
+```
+
+
+
+
+
+### Visualising the full network
+
+```{r}
+# printing the graph from the adjacency matrix
+
+graph1 <- graph_from_adjacency_matrix(new_adj_matrix, mode = "undirected", weighted = TRUE, diag = TRUE)
+plot(graph1)
+```
+
+```{r}
+# using layout, colour, labels and size to improve the readability
+
+deg <- degree(graph1)
+
+plot(
+  graph1,
+  layout = layout_with_fr,
+  vertex.size = sqrt(deg) * 2.5,
+  vertex.color = "skyblue",
+  vertex.label.cex = 0.5,
+  vertex.label.color = "black",
+  edge.color = "grey",
+  edge.width = 0.4,
+  main = "Network of the top TF-IDF Terms"
+)
+
+```
+
+
+```{r}
+# printing the final subtree version with the term with the highest degree at the center
+
+# finding the term with the highest degree
+degree <- rowSums(new_adj_matrix > 0)
+sorted_degree <- sort(degree, decreasing = TRUE)
+center <- names(sorted_degree)[1]
+center
+
+# create ego network of order 1
+subtree <- make_ego_graph(graph1, order = 1, nodes = center)[[1]]
+
+# compute the degree
+deg_sub <- degree(subtree)
+
+# keep the top 15 neighbours
+top_nodes <- names(sort(deg_sub, decreasing = TRUE))[1:16]   # includes center
+top_nodes <- setdiff(top_nodes, center)                      # remove center
+top_nodes <- top_nodes[1:15]                                 # keep 15 neighbours
+subgraph <- induced_subgraph(subtree, c(center, top_nodes))
+
+# plot
+deg_final <- degree(subgraph)
+
+plot(
+  subgraph,
+  layout = layout_with_fr,
+  vertex.size = sqrt(deg_final) * 2.5,
+  vertex.color = "lightblue",
+  vertex.label.cex = 0.7,
+  vertex.label.color = "black",
+  edge.color = "lightgrey",
+  edge.width = 0.5,
+  main = paste("Top 15 Neighbours of", center)
+)
+
+```
+
+
+
+
+### Centrality measures
+
+```{r}
+# degree centrality
+degree_centrality <- rowSums(new_adj_matrix > 0) - 1
+head(sort(degree_centrality, decreasing = TRUE), 10)
+```
+
+The degree centrality measures the centrality of a node by analysing its how many edges it has (degree) which reflects how many times a term appears. This outlines the number of times a specific term is shown throughout a data set. The higher the degree, the more nodes it is connected to which indicates it is more central in the network. 
+
+The code above shows that "climate" and "disaster" had the two highest centrality scores of 402 and 357 This means that they are found in the same document as many other terms which suggests that they could be the heavily linked to the dominant subjects in the data set. A high degree centrality also means that they frequently appear in posts which suggest they are at the core of the topic.
+
+
+```{r}
+# eigen vector centrality
+ev <- eigen(new_adj_matrix)$vectors[,1]
+eigenvector_centrality <- abs(ev)
+
+eigen_df <- data.frame(
+  term = rownames(new_adj_matrix),
+  eigenvector = eigenvector_centrality
+)
+
+head(eigen_df[order(eigen_df$eigenvector, decreasing = TRUE), ], 10)
+```
+
+The eigen vector centrality is used to measure not only connecting nodes but by analysiing the degree of those connected nodes to see how influential they are. A term is given a higher eigen vector score if they are connected to terms with a higher degree. 
+
+Based on the code above, "climate" and "glacier" have the highest eigen vector centrality of 0.68 and 0.28. This indicates that these terms are not only highly influential but are also connected to other highly influential nodes. Other nodes such as "change" and "collapse" are moderately high as well which implies that they are also connected to some highly influential nodes. This suggests that posts using these terms are closely related to the topic of the Nepal floods. 
+
+
+
+### Explain how data collection, API limitations, and any filtering or network construction decisions may affect your findings.
+
+#### Data collection limitations
+
+Despite the data set being extremely large, there are some limitations that could affect the results when collecting data. The data that was collected centers around 
+
+
+
+Several limitations should be considered when interpreting the dataset:
+
+- The dataset contains only posts returned by the selected Bluesky search terms and therefore may not contain every post discussing the Nepal floods.
+- Posts that discuss the event without using the selected search terminology may be missed.
+- Bluesky users are not representative of the entire population, so the results should be interpreted as patterns within the collected Bluesky discussion rather than general public opinion.
+- Engagement measures such as likes, replies, reposts and quotes represent a snapshot at the time the data was collected and may change later.
+- Some posts consisted mainly of external links. These posts remain useful for engagement or timing analysis but may contain little usable text for text mining.
+- Removing non-text elements and applying stemming simplifies the text and can remove some linguistic detail.
+
+
+
+#### API restrictions
+
+The API that was used to collect data also comes with limitations that can potentially skew results. Bluesky is a well established but less well known API meaning that is has less posts compared to other larger networking platforms. This means that the posts available to be retrieved may represent a specific demographic of people rather than representing the views of the whole population. 
+
+
+In addition, Bluesky prioritizes recent posts. This means that older posts that might be relevant to the Nepal floods may be exluded. As a result the data set might not tell the whole story. This has the potential to affect our results by producing nodes that might be central to the data we collected but might not be central to the overall topic we are trying to understand. 
+
+
+#### Filtering and Network construction decisions
+
+When preprocessing the data, it is important to use filtering to remove  all punctuation, numbers and empty posts to ensure that only terms that can be used remain. In addition, stemming has been used to reduce words into their base forms which helps improve node frequency and node centrality. Despite applying these two processes, there were still over 3735 unique terms in the adjacency matrix which is too large to produce a graph. To overcome this issue, TF-IDF was used to filter out the less influential nodes. After applying weights to each term, they were then ordered in descending order and the top 500 terms were taken to create a new adjacency matrix. The new matrix was now small enough to produce a graph that is more manageable. 
+
+When creating the graph, there were still a lot of terms which made it hard to read and interpret the information. As a result, a subgraph was created that would allow the viewer to focus in on the most important terms in the data. By creating an ego network of order 1, the graph was able to display only immediate connections to the most central node which is "climate". This process significantly reduced the number of nodes shown but was still very difficult to read. To ensure a clean and readable subgraph, we chose to display the top 15 nodes with the highest degree by using the induce_subgraph function. This resulted in an extremely readable graph that emphasises the connectedness of the top 15 most significant nodes to the topic of the Nepal flood.
+
+
+
+
+
+## Overall findings
+
+The investigation into the Nepal floods through text mining and the construction of graphs has helped uncover key terms that are associated with the events. By analysing term frequencies, centrality and creating a sub-graph, we can identify which unique terms are most influential in shaping conversations around the Nepal floods.
+
+
+To determine the most central term, degree centrality and eigenvectors were applied to the data. These two methods were chosen as they provide information on two separate aspects which results in a strong holistic understanding of how the terms relate to each other. The degree centrality is used to determine which node has the most edges. This can be interpreted as which term appears most frequently in a document with other given terms. The eigenvector was used to build on this by checking if a node is influential because it is connected to more terms or if it is influential because it’s connected to other nodes that have a high degree. The eigenvector centrality therefore provides a deeper layer of insight by highlighting terms that sit within influential neighbourhoods of the network rather than exlusively looking at each term's frequency. Together, these two measures provide a clear understanding of how terms relate to one another as well as which concepts have the most impact in shaping the discussion around the Nepal floods.
+
+
+The sub-graph that was created looks at the most central node and picks the top 15 connecting nodes to create a network that is easy to understand. From our centrality analysis using degree centrality and eigenvector centrality we were able to determine that the most central term is climate. Based on this information, climate was used as the center of our graph. As a result, we are able to see how other terms are connected to discussions surrounding climate and how it relates to the Nepal floods. Other terms such as glacier, change and collapse are shown to also be influential which suggests there is a common theme around the environment and climate change.
+
+
+Despite the use of centrality tests, there are some limitations that can affect the results. The dataset was collected using a range of dates. This can exclude earlier information which can result in a warped perspective when analysing the results. The data has also been filtered to include only English words. As a result, some important terms can be removed which would ultimately affect the outcome. Furthermore, only downloading data from one API can result in bias. By taking data from only Bluesky, the results can be viewed from a perspective that represents only Bluesky users and not the general population. To negate these factors, an extremely large sample of 1337 posts which resulted in 5029 unique terms. This enabled us to create more of a broad perspective when analysing the data. The down side of having a large term document matrix was that it was impossible to graph it. The solution to this issue was to us TF-IDF weighting to filter down the data to the top 500 most weighted terms. 500 was chosen as we believed that it is a large enough sample to keep influential nodes in the graph while also excluding less important ones. 
+
+
+Overall, the analysis of posts surround the Nepal floods has given rise to many key terms. These terms are highly connected which suggests that they may be influential when researching the topic. Terms such as climate, glacier and change all provide a unique perspective into the global perspective by outlining how the floods have been seen as a sign of climate change. As a result, the data suggests that the event is widely understood as a climate-linked disaster with deeper environmental causes.

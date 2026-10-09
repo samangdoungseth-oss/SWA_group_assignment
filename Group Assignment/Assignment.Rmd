@@ -13,10 +13,23 @@ output:
     number_sections: true
     latex_engine: xelatex
 subtitle: Bluesky Discussion of the Nepal Floods
+
 header-includes:
 - \let\oldtableofcontents\tableofcontents
 - \renewcommand{\tableofcontents}{\newpage\oldtableofcontents}
 ---
+
+### Group 40
+
+| Group Member      | SID      | Contribution |
+|-------------------|----------|--------------|
+| Doungseth Samang  | 22213999 | 34%          |
+| Arjan Sandhu      | 22197363 | 33%          |
+| Omar Hussain      | 20755557 | 33%          |
+
+Github link: https://github.com/samangdoungseth-oss/SWA_group_assignment
+
+\newpage
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(
